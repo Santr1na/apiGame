@@ -3,13 +3,21 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "start:db": "node index-with-db.js",
+    "populate": "node populate-db.js",
+    "populate:all": "node populate-all-games.js",
+    "deduplicate": "node deduplicate.js",
+    "deduplicate:stats": "node deduplicate.js stats",
+    "demo": "node demo-server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
     "axios": "^1.7.7",
     "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.5.0",
     "node-cache": "^5.1.2",
-    "firebase-admin": "^12.5.0"
+    "sqlite3": "^5.1.7"
   }
 }

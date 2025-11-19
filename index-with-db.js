@@ -1,40 +1,40 @@
-require('dotenv').config();
-
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const NodeCache = require('node-cache');
 const admin = require('firebase-admin');
+const {
+  initDatabase,
+  getGameById,
+  searchGames,
+  getPopularGames,
+  getRandomGames,
+  getGamesCount,
+  saveGames
+} = require('./db-setup');
 
 const app = express();
 const PORT = process.env.PORT || 3002;
+
+// Use database flag
+const USE_DATABASE = process.env.USE_DATABASE !== 'false'; // Default: true
 
 // Firebase (optional - will skip if no credentials provided)
 let db = null;
 let firebaseEnabled = false;
 
 try {
-  const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
-  console.log('🔍 Firebase credentials length:', serviceAccountRaw?.length || 0);
-  
-  if (serviceAccountRaw) {
-    const serviceAccount = JSON.parse(serviceAccountRaw);
-    console.log('🔍 Firebase project_id:', serviceAccount.project_id);
-    
-    if (serviceAccount.project_id) {
-      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-      db = admin.firestore();
-      firebaseEnabled = true;
-      console.log('✅ Firebase initialized successfully');
-    } else {
-      console.log('⚠️ Firebase credentials invalid - project_id missing');
-    }
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+  if (serviceAccount.project_id) {
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    db = admin.firestore();
+    firebaseEnabled = true;
+    console.log('✅ Firebase initialized');
   } else {
-    console.log('⚠️ FIREBASE_SERVICE_ACCOUNT environment variable not found');
+    console.log('⚠️ Firebase credentials not provided - auth features disabled');
   }
 } catch (error) {
   console.log('⚠️ Firebase initialization failed - auth features disabled:', error.message);
-  console.log('🔍 Error details:', error);
 }
 
 // Middleware
@@ -66,9 +66,8 @@ let steamApps = null;
 async function getSteamApps() {
   if (steamApps) return steamApps;
   try {
-    const res = await axios.get(steamAppsUrl, { timeout: 20000 });
-    steamApps = res.data.applist.apps || [];
-    console.log(`Loaded ${steamApps.length} Steam apps`);
+    const res = await axios.get(steamAppsUrl, { timeout: 10000 });
+    steamApps = res.data.applist.apps;
     return steamApps;
   } catch (err) {
     console.error('Steam fetch error:', err.message);
@@ -177,7 +176,7 @@ async function getMultipleImageSources(game) {
   return sources[0] || 'N/A';
 }
 
-// API Data Fetchers
+// API Data Fetchers (fallback when DB doesn't have data)
 async function fetchRawgGames(endpoint, params = {}) {
   if (!RAWG_API_KEY) throw new Error('RAWG API key not configured');
   
@@ -193,55 +192,6 @@ async function fetchRawgGames(endpoint, params = {}) {
   }
 }
 
-async function fetchGiantBombGames(endpoint, params = {}) {
-  if (!GIANT_BOMB_API_KEY) throw new Error('Giant Bomb API key not configured');
-  
-  try {
-    const response = await axios.get(`${giantBombBaseUrl}${endpoint}`, {
-      params: { api_key: GIANT_BOMB_API_KEY, format: 'json', ...params },
-      timeout: 10000
-    });
-    return response.data.results || [];
-  } catch (err) {
-    console.error('Giant Bomb API error:', err.message);
-    return [];
-  }
-}
-
-async function fetchTheGamesDbGames(endpoint, params = {}) {
-  if (!THEGAMESDB_API_KEY) throw new Error('TheGamesDB API key not configured');
-  
-  try {
-    const response = await axios.get(`${theGamesDbBaseUrl}${endpoint}`, {
-      params: { apikey: THEGAMESDB_API_KEY, ...params },
-      timeout: 10000
-    });
-    return response.data.data || [];
-  } catch (err) {
-    console.error('TheGamesDB API error:', err.message);
-    return [];
-  }
-}
-
-async function fetchSteamGameDetails(appId) {
-  if (!appId) return null;
-  
-  try {
-    const response = await axios.get(steamStoreUrl, {
-      params: { appids: appId, format: 'json' },
-      timeout: 10000
-    });
-    const data = response.data[appId];
-    if (data && data.success && data.data) {
-      return data.data;
-    }
-  } catch (err) {
-    console.error('Steam Store API error:', err.message);
-  }
-  return null;
-}
-
-// Data Processors
 async function processRawgGame(game) {
   const image = await getMultipleImageSources(game);
   
@@ -259,56 +209,6 @@ async function processRawgGame(game) {
   };
 }
 
-async function processGiantBombGame(game) {
-  const platforms = game.platforms ? game.platforms.map(p => p.name) : [];
-  
-  return {
-    id: `giantbomb_${game.id}`,
-    source: 'GiantBomb',
-    name: game.name,
-    cover_image: game.image?.original || 'N/A',
-    rating: game.score || 0,
-    critic_rating: game.score || 'N/A',
-    release_year: game.original_release_date ? new Date(game.original_release_date).getFullYear() : 'N/A',
-    main_genre: game.genres?.[0]?.name || 'N/A',
-    platforms: platforms,
-    description: game.deck || 'N/A'
-  };
-}
-
-async function processTheGamesDbGame(game) {
-  return {
-    id: `tgdb_${game.id}`,
-    source: 'TheGamesDB',
-    name: game.game_title,
-    cover_image: game.boxart || 'N/A',
-    rating: 0,
-    critic_rating: 'N/A',
-    release_year: game.release_date ? new Date(game.release_date).getFullYear() : 'N/A',
-    main_genre: game.genres?.[0] || 'N/A',
-    platforms: game.platform ? [game.platform] : [],
-    description: game.overview || 'N/A'
-  };
-}
-
-async function processSteamGame(game) {
-  const steamDetails = await fetchSteamGameDetails(game.appid);
-  
-  return {
-    id: `steam_${game.appid}`,
-    source: 'Steam',
-    name: game.name,
-    cover_image: await getSteamCover(game.name, game.appid),
-    rating: 0,
-    critic_rating: steamDetails?.metacritic?.score || 'N/A',
-    release_year: steamDetails?.release_date?.date ? new Date(steamDetails.release_date.date).getFullYear() : 'N/A',
-    main_genre: steamDetails?.genres?.[0]?.description || 'N/A',
-    platforms: ['PC'],
-    description: steamDetails?.short_description || 'N/A',
-    steam_appid: game.appid
-  };
-}
-
 async function processDetailedGame(gameData) {
   const favs = await loadFavoriteCounts();
   const stats = await loadStatusCounts();
@@ -322,71 +222,48 @@ async function processDetailedGame(gameData) {
     passed: st.passed || 0,
     postponed: st.postponed || 0,
     abandoned: st.abandoned || 0,
-    similar_games: [] // Can be enhanced with cross-API recommendations
+    similar_games: []
   };
 }
 
-// Combined API Fetcher
-async function getAllGames(limit = 50) {
-  const games = [];
-  
-  try {
-    // Fetch from RAWG
-    const rawgGames = await fetchRawgGames('/games', { 
-      page_size: Math.min(20, limit),
-      ordering: '-metacritic'
-    });
-    games.push(...await Promise.all(rawgGames.map(processRawgGame)));
-    
-    // Fetch from Giant Bomb (if we still need more games)
-    if (games.length < limit) {
-      const giantBombGames = await fetchGiantBombGames('/games', { 
-        limit: Math.min(15, limit - games.length),
-        sort_field: 'score',
-        sort_type: 'desc'
-      });
-      games.push(...await Promise.all(giantBombGames.map(processGiantBombGame)));
-    }
-    
-    // Fetch from Steam (if we still need more games)
-    if (games.length < limit) {
-      const steamGames = await getSteamApps();
-      const randomSteamGames = steamGames
-        .sort(() => Math.random() - 0.5)
-        .slice(0, Math.min(15, limit - games.length))
-        .map(app => ({ appid: app.appid, name: app.name }));
-      
-      games.push(...await Promise.all(randomSteamGames.map(processSteamGame)));
-    }
-    
-    // Fetch from TheGamesDB (if we still need more games)
-    if (games.length < limit) {
-      const tgdbGames = await fetchTheGamesDbGames('/games', { 
-        limit: Math.min(10, limit - games.length)
-      });
-      games.push(...await Promise.all(tgdbGames.map(processTheGamesDbGame)));
-    }
-    
-    return games.slice(0, limit);
-  } catch (err) {
-    console.error('getAllGames error:', err.message);
-    return [];
-  }
-}
-
 // Routes
-app.get('/health', (req, res) => res.json({ status: 'OK', sources: ['RAWG', 'GiantBomb', 'Steam', 'TheGamesDB'] }));
+app.get('/health', async (req, res) => {
+  const dbCount = USE_DATABASE ? await getGamesCount().catch(() => 0) : 0;
+  res.json({ 
+    status: 'OK', 
+    sources: ['RAWG', 'GiantBomb', 'Steam', 'TheGamesDB'],
+    database: USE_DATABASE ? 'enabled' : 'disabled',
+    games_in_db: dbCount
+  });
+});
 
 app.get('/popular', async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
   
   try {
-    const rawgGames = await fetchRawgGames('/games', { 
-      page_size: limit,
-      ordering: '-metacritic'
-    });
+    let games = [];
     
-    const games = await Promise.all(rawgGames.map(processRawgGame));
+    // Try database first
+    if (USE_DATABASE) {
+      games = await getPopularGames(limit);
+      console.log(`📊 Fetched ${games.length} popular games from database`);
+    }
+    
+    // Fallback to API if database is empty or disabled
+    if (games.length === 0) {
+      console.log('📡 Fetching from RAWG API (database empty or disabled)');
+      const rawgGames = await fetchRawgGames('/games', { 
+        page_size: limit,
+        ordering: '-metacritic'
+      });
+      games = await Promise.all(rawgGames.map(processRawgGame));
+      
+      // Save to database for future use
+      if (USE_DATABASE && games.length > 0) {
+        await saveGames(games).catch(err => console.error('Save error:', err));
+      }
+    }
+    
     res.json(games);
   } catch (err) {
     console.error('/popular ERROR:', err.message);
@@ -401,36 +278,32 @@ app.get('/search', async (req, res) => {
   if (!q) return res.status(400).json({ error: 'Query required' });
   
   try {
-    const results = [];
+    let results = [];
     
-    // Search RAWG
-    const rawgResults = await fetchRawgGames('/games', { 
-      search: q, 
-      page_size: Math.min(5, limit)
-    });
-    const rawgGames = await Promise.all(rawgResults.map(processRawgGame));
-    results.push(...rawgGames);
-    
-    // Search Giant Bomb (if we need more results)
-    if (results.length < limit) {
-      const giantBombResults = await fetchGiantBombGames('/games', { 
-        search: q,
-        limit: Math.min(5, limit - results.length)
-      });
-      const giantBombGames = await Promise.all(giantBombResults.map(processGiantBombGame));
-      results.push(...giantBombGames);
+    // Try database first
+    if (USE_DATABASE) {
+      results = await searchGames(q, limit);
+      console.log(`📊 Found ${results.length} games in database for "${q}"`);
     }
     
-    // Search Steam by name matching
+    // If not enough results, fetch from APIs
     if (results.length < limit) {
-      const steamApps = await getSteamApps();
-      const matchingSteamGames = steamApps
-        .filter(app => app.name.toLowerCase().includes(q.toLowerCase()))
-        .slice(0, Math.min(3, limit - results.length))
-        .map(app => ({ appid: app.appid, name: app.name }));
+      console.log(`📡 Fetching additional results from APIs (need ${limit - results.length} more)`);
       
-      const steamGames = await Promise.all(matchingSteamGames.map(processSteamGame));
-      results.push(...steamGames);
+      // Search RAWG
+      if (RAWG_API_KEY && results.length < limit) {
+        const rawgResults = await fetchRawgGames('/games', { 
+          search: q, 
+          page_size: Math.min(5, limit - results.length)
+        });
+        const rawgGames = await Promise.all(rawgResults.map(processRawgGame));
+        results.push(...rawgGames);
+        
+        // Save new games to database
+        if (USE_DATABASE && rawgGames.length > 0) {
+          await saveGames(rawgGames).catch(err => console.error('Save error:', err));
+        }
+      }
     }
     
     res.json(results.slice(0, limit));
@@ -446,8 +319,28 @@ app.get('/games', async (req, res) => {
   const hist = historyCache.get(historyKey) || [];
   
   try {
-    // Get games from all sources
-    const allGames = await getAllGames(50);
+    let allGames = [];
+    
+    // Try database first
+    if (USE_DATABASE) {
+      allGames = await getRandomGames(50);
+      console.log(`📊 Fetched ${allGames.length} random games from database`);
+    }
+    
+    // Fallback to API if database is empty
+    if (allGames.length === 0) {
+      console.log('📡 Fetching from APIs (database empty)');
+      const rawgGames = await fetchRawgGames('/games', { 
+        page_size: 20,
+        ordering: '-metacritic'
+      });
+      allGames = await Promise.all(rawgGames.map(processRawgGame));
+      
+      // Save to database
+      if (USE_DATABASE && allGames.length > 0) {
+        await saveGames(allGames).catch(err => console.error('Save error:', err));
+      }
+    }
     
     if (!allGames.length) {
       return res.status(404).json({ error: 'No games available' });
@@ -474,34 +367,32 @@ app.get('/games/:id', async (req, res) => {
   const gameId = req.params.id;
   
   try {
-    // Parse the ID to determine source
     let gameData = null;
     
-    if (gameId.startsWith('rawg_')) {
-      const rawgId = gameId.replace('rawg_', '');
-      const rawgGame = await fetchRawgGames(`/games/${rawgId}`);
-      if (rawgGame) {
-        gameData = await processRawgGame(rawgGame);
+    // Try database first
+    if (USE_DATABASE) {
+      gameData = await getGameById(gameId);
+      if (gameData) {
+        console.log(`📊 Found game ${gameId} in database`);
       }
-    } else if (gameId.startsWith('giantbomb_')) {
-      const gbId = gameId.replace('giantbomb_', '');
-      const gbGames = await fetchGiantBombGames(`/game/${gbId}`);
-      if (gbGames.length > 0) {
-        gameData = await processGiantBombGame(gbGames[0]);
-      }
-    } else if (gameId.startsWith('steam_')) {
-      const steamAppId = gameId.replace('steam_', '');
-      const steamApps = await getSteamApps();
-      const steamApp = steamApps.find(app => app.appid.toString() === steamAppId);
+    }
+    
+    // Fallback to API if not in database
+    if (!gameData) {
+      console.log(`📡 Fetching game ${gameId} from API`);
       
-      if (steamApp) {
-        gameData = await processSteamGame(steamApp);
-      }
-    } else if (gameId.startsWith('tgdb_')) {
-      const tgdbId = gameId.replace('tgdb_', '');
-      const tgdbGame = await fetchTheGamesDbGames(`/games/${tgdbId}`);
-      if (tgdbGame.length > 0) {
-        gameData = await processTheGamesDbGame(tgdbGame[0]);
+      if (gameId.startsWith('rawg_')) {
+        const rawgId = gameId.replace('rawg_', '');
+        const response = await axios.get(`${rawgBaseUrl}/games/${rawgId}`, {
+          params: { key: RAWG_API_KEY },
+          timeout: 10000
+        });
+        gameData = await processRawgGame(response.data);
+        
+        // Save to database
+        if (USE_DATABASE) {
+          await saveGames([gameData]).catch(err => console.error('Save error:', err));
+        }
       }
     }
     
@@ -518,7 +409,7 @@ app.get('/games/:id', async (req, res) => {
   }
 });
 
-// Favorite and Status routes remain the same
+// Favorite and Status routes
 app.get('/games/:id/favorite', authenticate, async (req, res) => {
   try {
     const counts = await loadFavoriteCounts();
@@ -586,14 +477,17 @@ app.delete('/games/:id/status/:status', authenticate, async (req, res) => {
   }
 });
 
-// New route to get API status
+// API status
 app.get('/api-status', async (req, res) => {
+  const dbCount = USE_DATABASE ? await getGamesCount().catch(() => 0) : 0;
+  
   const status = {
     RAWG: !!RAWG_API_KEY,
     GiantBomb: !!GIANT_BOMB_API_KEY,
     TheGamesDB: !!THEGAMESDB_API_KEY,
-    Steam: true, // Steam doesn't require API key for app list
-    firebase: firebaseEnabled
+    Steam: true,
+    Database: USE_DATABASE,
+    GamesInDB: dbCount
   };
   
   res.json(status);
@@ -609,6 +503,20 @@ const server = app.listen(PORT, async () => {
     Steam: '✅ Available'
   });
   console.log('🔐 Firebase Auth:', firebaseEnabled ? '✅ Enabled' : '❌ Disabled');
+  console.log('💾 Database:', USE_DATABASE ? '✅ Enabled' : '❌ Disabled');
+  
+  if (USE_DATABASE) {
+    try {
+      await initDatabase();
+      const count = await getGamesCount();
+      console.log(`📦 Database ready with ${count} games`);
+      if (count === 0) {
+        console.log('💡 Tip: Run "node populate-db.js" to populate the database');
+      }
+    } catch (e) {
+      console.error('Database init ERROR:', e.message);
+    }
+  }
   
   try {
     await getSteamApps();
