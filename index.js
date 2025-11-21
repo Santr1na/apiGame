@@ -246,7 +246,110 @@ async function fetchSteamGameDetails(appId) {
   return null;
 }
 
-// Data Processors
+// Video and Media Helpers
+async function getGameTrailers(game, source) {
+  const trailers = [];
+  
+  try {
+    if (source === 'RAWG' && game.clip) {
+      trailers.push({
+        type: 'trailer',
+        url: game.clip.clip,
+        thumbnail: game.clip.preview,
+        title: `${game.name} Trailer`
+      });
+    }
+    
+    if (source === 'steam' && game.steam_appid) {
+      const steamDetails = await fetchSteamGameDetails(game.steam_appid);
+      if (steamDetails?.movies) {
+        trailers.push(...steamDetails.movies.map(movie => ({
+          type: 'trailer',
+          url: `https://www.youtube.com/watch?v=${movie.id}`,
+          thumbnail: movie.thumbnail,
+          title: movie.name || `${game.name} Trailer`
+        })));
+      }
+    }
+    
+    // Add YouTube search as fallback
+    if (trailers.length === 0) {
+      const searchQuery = `${game.name} official trailer`.replace(/\s+/g, '+');
+      trailers.push({
+        type: 'search',
+        url: `https://www.youtube.com/results?search_query=${searchQuery}`,
+        thumbnail: null,
+        title: `Search for ${game.name} trailers`
+      });
+    }
+    
+    return trailers;
+  } catch (error) {
+    console.error('Error fetching trailers:', error.message);
+    return [{
+      type: 'search',
+      url: `https://www.youtube.com/results?search_query=${encodeURIComponent(game.name + ' official trailer')}`,
+      thumbnail: null,
+      title: `Search for ${game.name} trailers`
+    }];
+  }
+}
+
+// Enhanced Similar Games Fetcher
+async function getSimilarGames(gameData, limit = 6) {
+  const similar = [];
+  
+  try {
+    // Get similar games from RAWG if available
+    if (gameData.source === 'RAWG') {
+      const rawgId = gameData.id.replace('rawg_', '');
+      const similarGames = await fetchRawgGames(`/games/${rawgId}/suggested`, { 
+        page_size: limit 
+      });
+      
+      if (similarGames && similarGames.results) {
+        const processedGames = await Promise.all(
+          similarGames.results.slice(0, limit).map(processRawgGame)
+        );
+        // Process as detailed games to match /games endpoint structure
+        const detailedSimilar = await Promise.all(
+          processedGames.map(processDetailedGame)
+        );
+        similar.push(...detailedSimilar);
+      }
+    }
+    
+    // If we don't have enough similar games, get games by genre
+    if (similar.length < limit && gameData.main_genre && gameData.main_genre !== 'N/A') {
+      const genreGames = await fetchRawgGames('/games', {
+        genres: gameData.main_genre.toLowerCase().replace(/\s+/g, '-'),
+        page_size: limit * 2,
+        ordering: '-rating'
+      });
+      
+      if (genreGames && genreGames.length > 0) {
+        const processedGames = await Promise.all(
+          genreGames
+            .filter(g => g.name !== gameData.name) // Exclude current game
+            .slice(0, limit - similar.length)
+            .map(processRawgGame)
+        );
+        // Process as detailed games to match /games endpoint structure
+        const detailedSimilar = await Promise.all(
+          processedGames.map(processDetailedGame)
+        );
+        similar.push(...detailedSimilar);
+      }
+    }
+    
+    return similar.slice(0, limit);
+  } catch (error) {
+    console.error('Error fetching similar games:', error.message);
+    return [];
+  }
+}
+
+// Enhanced Data Processors
 async function processRawgGame(game) {
   const image = await getMultipleImageSources(game);
   
@@ -260,7 +363,11 @@ async function processRawgGame(game) {
     release_year: game.released ? new Date(game.released).getFullYear() : 'N/A',
     main_genre: game.genres?.[0]?.name || 'N/A',
     platforms: game.platforms ? game.platforms.map(p => p.platform.name) : [],
-    description: game.description_raw || 'N/A'
+    description: game.description_raw || 'N/A',
+    developers: game.developers ? game.developers.map(d => d.name) : [],
+    publishers: game.publishers ? game.publishers.map(p => p.name) : [],
+    tags: game.tags ? game.tags.slice(0, 10).map(tag => tag.name) : [],
+    background_image: game.background_image || null
   };
 }
 
@@ -277,7 +384,11 @@ async function processGiantBombGame(game) {
     release_year: game.original_release_date ? new Date(game.original_release_date).getFullYear() : 'N/A',
     main_genre: game.genres?.[0]?.name || 'N/A',
     platforms: platforms,
-    description: game.deck || 'N/A'
+    description: game.deck || 'N/A',
+    developers: game.developers ? [game.developers.name] : [],
+    publishers: game.publishers ? [game.publishers.name] : [],
+    tags: game.genres ? game.genres.map(g => g.name) : [],
+    background_image: null
   };
 }
 
@@ -292,7 +403,11 @@ async function processTheGamesDbGame(game) {
     release_year: game.release_date ? new Date(game.release_date).getFullYear() : 'N/A',
     main_genre: game.genres?.[0] || 'N/A',
     platforms: game.platform ? [game.platform] : [],
-    description: game.overview || 'N/A'
+    description: game.overview || 'N/A',
+    developers: [],
+    publishers: [],
+    tags: game.genres ? [game.genres[0]] : [],
+    background_image: null
   };
 }
 
@@ -304,13 +419,17 @@ async function processSteamGame(game) {
     source: 'Steam',
     name: game.name,
     cover_image: await getSteamCover(game.name, game.appid),
-    rating: 0,
+    rating: steamDetails?.metacritic?.score || 0,
     critic_rating: steamDetails?.metacritic?.score || 'N/A',
     release_year: steamDetails?.release_date?.date ? new Date(steamDetails.release_date.date).getFullYear() : 'N/A',
     main_genre: steamDetails?.genres?.[0]?.description || 'N/A',
     platforms: ['PC'],
     description: steamDetails?.short_description || 'N/A',
-    steam_appid: game.appid
+    steam_appid: game.appid,
+    developers: steamDetails?.developers || [],
+    publishers: steamDetails?.publishers ? [steamDetails.publishers] : [],
+    tags: steamDetails?.genres ? steamDetails.genres.map(g => g.description) : [],
+    background_image: steamDetails?.header_image || null
   };
 }
 
@@ -481,17 +600,20 @@ app.get('/games/:id', async (req, res) => {
   try {
     // Parse the ID to determine source
     let gameData = null;
+    let rawGameData = null;
     
     if (gameId.startsWith('rawg_')) {
       const rawgId = gameId.replace('rawg_', '');
       const rawgGame = await fetchRawgGames(`/games/${rawgId}`);
       if (rawgGame) {
+        rawGameData = rawgGame;
         gameData = await processRawgGame(rawgGame);
       }
     } else if (gameId.startsWith('giantbomb_')) {
       const gbId = gameId.replace('giantbomb_', '');
       const gbGames = await fetchGiantBombGames(`/game/${gbId}`);
       if (gbGames.length > 0) {
+        rawGameData = gbGames[0];
         gameData = await processGiantBombGame(gbGames[0]);
       }
     } else if (gameId.startsWith('steam_')) {
@@ -500,12 +622,14 @@ app.get('/games/:id', async (req, res) => {
       const steamApp = steamApps.find(app => app.appid.toString() === steamAppId);
       
       if (steamApp) {
+        rawGameData = steamApp;
         gameData = await processSteamGame(steamApp);
       }
     } else if (gameId.startsWith('tgdb_')) {
       const tgdbId = gameId.replace('tgdb_', '');
       const tgdbGame = await fetchTheGamesDbGames(`/games/${tgdbId}`);
       if (tgdbGame.length > 0) {
+        rawGameData = tgdbGame[0];
         gameData = await processTheGamesDbGame(tgdbGame[0]);
       }
     }
@@ -514,9 +638,37 @@ app.get('/games/:id', async (req, res) => {
       return res.status(404).json({ error: 'Game not found' });
     }
     
-    // Get detailed game info
+    // Get detailed game info with enhanced features
     const detailedGame = await processDetailedGame(gameData);
-    res.json(detailedGame);
+    
+    // Add enhanced features
+    try {
+      const trailers = await getGameTrailers(rawGameData, gameData.source);
+      const similarGames = await getSimilarGames(gameData, 6);
+      
+      // Enhanced response with additional information
+      const enhancedGame = {
+        ...detailedGame,
+        videos: trailers,
+        similar_games: similarGames,
+        external_links: {
+          steam_store: gameData.steam_appid ? `https://store.steampowered.com/app/${gameData.steam_appid}/` : null,
+          rawg_page: gameData.source === 'RAWG' ? `https://rawg.io/games/${gameData.id.replace('rawg_', '')}` : null,
+          youtube_search: `https://www.youtube.com/results?search_query=${encodeURIComponent(gameData.name + ' game')}`
+        },
+        technical_info: {
+          requirements: gameData.steam_appid ? (await fetchSteamGameDetails(gameData.steam_appid))?.pc_requirements || null : null,
+          metacritic_score: gameData.critic_rating,
+          esrb_rating: rawGameData?.esrb_rating || null
+        }
+      };
+      
+      res.json(enhancedGame);
+    } catch (enhancedError) {
+      console.error('Enhanced features error:', enhancedError.message);
+      // Return basic info if enhanced features fail
+      res.json(detailedGame);
+    }
   } catch (err) {
     console.error('/games/:id ERROR:', err.message);
     res.status(500).json({ error: 'Failed to fetch game details' });
