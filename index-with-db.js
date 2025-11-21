@@ -185,10 +185,15 @@ async function fetchRawgGames(endpoint, params = {}) {
       params: { key: RAWG_API_KEY, ...params },
       timeout: 10000
     });
+    
+    // Return single game for /games/id endpoint, array for other endpoints
+    if (endpoint.startsWith('/games/')) {
+      return response.data;
+    }
     return response.data.results || [];
   } catch (err) {
     console.error('RAWG API error:', err.message);
-    return [];
+    return endpoint.startsWith('/games/') ? null : [];
   }
 }
 
