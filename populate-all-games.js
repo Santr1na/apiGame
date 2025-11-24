@@ -1,3 +1,4 @@
+require('dotenv').config();
 const axios = require('axios');
 const {
   initDatabase,
@@ -162,8 +163,13 @@ async function fetchAllGiantBombGames() {
   }
 }
 
-// Fetch ALL games from Steam
+// Fetch ALL games from Steam (TEMPORARILY DISABLED)
+// Steam API endpoint is no longer available - GetAppList method not found
 async function fetchAllSteamGames() {
+  console.log('⚠️ Steam API is temporarily disabled (endpoint no longer available)');
+  return [];
+  /*
+  // Previous implementation removed due to API endpoint being unavailable
   console.log('📥 Fetching ALL games from Steam...');
   const games = [];
 
@@ -213,6 +219,7 @@ async function fetchAllSteamGames() {
     console.error('❌ Steam fetch error:', err.message);
     return games;
   }
+  */
 }
 
 // Fetch ALL games from TheGamesDB
@@ -302,23 +309,19 @@ async function populateAllGames() {
     await initDatabase();
     console.log('');
 
-    // Fetch from all sources sequentially to avoid overwhelming APIs
-    console.log('📊 Step 1/4: RAWG (estimated: 30-60 min)');
+    // Fetch from all sources sequentially to avoid overwhelming APIs (Steam disabled)
+    console.log('📊 Step 1/3: RAWG (estimated: 30-60 min)');
     const rawgGames = await fetchAllRawgGames();
     if (rawgGames.length > 0) await saveGames(rawgGames);
     console.log('');
 
-    console.log('📊 Step 2/4: Giant Bomb (estimated: 10-20 min)');
+    console.log('📊 Step 2/3: Giant Bomb (estimated: 10-20 min)');
     const giantBombGames = await fetchAllGiantBombGames();
     if (giantBombGames.length > 0) await saveGames(giantBombGames);
     console.log('');
 
-    console.log('📊 Step 3/4: Steam (estimated: 5-10 min)');
-    const steamGames = await fetchAllSteamGames();
-    if (steamGames.length > 0) await saveGames(steamGames);
-    console.log('');
-
-    console.log('📊 Step 4/4: TheGamesDB (estimated: 20-30 min)');
+    // Steam API disabled due to endpoint unavailability
+    console.log('📊 Step 3/3: TheGamesDB (estimated: 20-30 min)');
     const tgdbGames = await fetchAllTheGamesDbGames();
     if (tgdbGames.length > 0) await saveGames(tgdbGames);
     console.log('');
