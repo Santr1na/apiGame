@@ -67,8 +67,8 @@ async function mergeDuplicates() {
         ids.map(id => getGameDetails(id))
       );
       
-      // Choose the best version (priority: RAWG > Giant Bomb > Steam > TheGamesDB)
-      const sourcePriority = { 'RAWG': 4, 'GiantBomb': 3, 'Steam': 2, 'TheGamesDB': 1 };
+      // Choose the best version (priority: IGDB > RAWG > Giant Bomb > Steam > TheGamesDB)
+      const sourcePriority = { 'IGDB': 5, 'RAWG': 4, 'GiantBomb': 3, 'Steam': 2, 'TheGamesDB': 1 };
       
       versions.sort((a, b) => {
         // First by source priority
