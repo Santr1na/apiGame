@@ -1,6 +1,6 @@
 # Multi-Source Games API
 
-A comprehensive games API that aggregates data from multiple sources instead of relying solely on IGDB. This API combines data from RAWG, Giant Bomb, Steam Store, and TheGamesDB to provide comprehensive game information.
+A comprehensive games API that aggregates data from multiple sources with IGDB as the primary source. This API combines data from IGDB, RAWG, Giant Bomb, Steam Store, and TheGamesDB to provide comprehensive game information with optimized data prioritization.
 
 ## 🚀 Key Features
 
@@ -13,12 +13,18 @@ A comprehensive games API that aggregates data from multiple sources instead of 
 
 ## 📊 Data Sources
 
-| Source | Description | Coverage | Status |
-|--------|-------------|----------|---------|
-| **RAWG** | Primary source - comprehensive database | 350,000+ games | ✅ Active |
-| **Giant Bomb** | Community-driven game encyclopedia | 40,000+ games | ✅ Active |
-| **Steam Store** | Steam platform games | 50,000+ games | ✅ Active |
-| **TheGamesDB** | Community-driven retro/modern games | 350,000+ games | ✅ Active |
+| Source | Description | Coverage | Priority | Status |
+|--------|-------------|----------|----------|---------|
+| **IGDB** | Primary source - comprehensive game database | 200,000+ games | **1** | ✅ Active |
+| **RAWG** | Secondary source - comprehensive database | 350,000+ games | **2** | ✅ Active |
+| **Giant Bomb** | Community-driven game encyclopedia | 40,000+ games | **3** | ✅ Active |
+| **Steam Store** | Steam platform games | 50,000+ games | **4** | ✅ Active |
+| **TheGamesDB** | Community-driven retro/modern games | 350,000+ games | **5** | ✅ Active |
+
+### 🔥 Data Prioritization
+- **General Discovery**: IGDB → RAWG → Giant Bomb → Steam → TheGamesDB
+- **Search Results**: RAWG → IGDB → Giant Bomb → Steam → TheGamesDB
+- **Similar Games**: Source-matched → IGDB → RAWG
 
 ## 🛠️ Installation
 
@@ -34,6 +40,7 @@ cp .env.example .env
 ```
 
 3. **Get API Keys:**
+   - **IGDB**: https://api.igdb.com/signup/ (Free tier: 10 requests/second)
    - **RAWG**: https://rawg.io/apidocs (Free tier: 20,000 requests/day)
    - **Giant Bomb**: https://www.giantbomb.com/api/ (Free tier: 200 requests/day)
    - **TheGamesDB**: https://www.thegamesdb.net/ (Free)
@@ -48,7 +55,9 @@ npm start
 ## 🔧 Environment Variables
 
 ```env
-# Required API Keys
+# Required API Keys (Priority: IGDB first)
+IGDB_CLIENT_ID=your_igdb_client_id
+IGDB_CLIENT_SECRET=your_igdb_client_secret
 RAWG_API_KEY=your_rawg_api_key
 GIANT_BOMB_API_KEY=your_giant_bomb_api_key
 THEGAMESDB_API_KEY=your_thegamesdb_api_key
@@ -92,10 +101,11 @@ DELETE /games/{game_id}/status/{status}
 ## 🎮 Game ID Format
 
 Each game has a source-prefixed ID:
-- `rawg_{id}` - Games from RAWG API
-- `giantbomb_{id}` - Games from Giant Bomb
-- `steam_{appid}` - Games from Steam Store
-- `tgdb_{id}` - Games from TheGamesDB
+- `igdb_{id}` - Games from IGDB API (Priority 1)
+- `rawg_{id}` - Games from RAWG API (Priority 2)
+- `giantbomb_{id}` - Games from Giant Bomb (Priority 3)
+- `steam_{appid}` - Games from Steam Store (Priority 4)
+- `tgdb_{id}` - Games from TheGamesDB (Priority 5)
 
 ## 📝 Response Examples
 
@@ -184,22 +194,24 @@ The API gracefully handles:
 - Network timeouts (returns partial results)
 - Invalid game IDs (returns 404)
 
-## 🔄 Migration from IGDB
+## 🔄 Enhanced API with IGDB Integration
 
-### Breaking Changes
-1. **Game IDs**: Now prefixed with source (`rawg_123` instead of `123`)
-2. **Rating Scale**: RAWG uses 0-5 scale (converted to 0-100)
-3. **Platform Format**: Simplified platform names
-4. **Field Names**: Some field names have changed for consistency
+### New Features with IGDB
+1. **IGDB Integration**: Primary data source with 200,000+ games
+2. **Optimized Prioritization**: IGDB first for general discovery, RAWG first for search
+3. **Enhanced Coverage**: More comprehensive game database
+4. **Improved Similar Games**: Cross-source recommendation system
 
-### Backward Compatibility
-- All existing routes maintained
-- Same response structure for core fields
-- Firebase integration unchanged
+### Migration Notes
+- **Game IDs**: Now prefixed with source (`igdb_123`, `rawg_123` etc.)
+- **Priorities**: IGDB → RAWG → GiantBomb → Steam → TheGamesDB for general use
+- **Search Priority**: RAWG → IGDB → GiantBomb → Steam for search results
+- **Backward Compatibility**: All existing routes and Firebase integration maintained
 
 ## 🛡️ Rate Limiting & Best Practices
 
 ### API Key Limits (Free Tiers)
+- **IGDB**: 10 requests/second (42,000 requests/day)
 - **RAWG**: 20,000 requests/day
 - **Giant Bomb**: 200 requests/day
 - **TheGamesDB**: 1000 requests/hour
@@ -246,4 +258,4 @@ MIT License - see LICENSE file for details
 
 ---
 
-**Note**: This API replaces the previous IGDB-only implementation with a more robust, multi-source approach that provides better coverage and reliability.
+**Note**: This API now includes comprehensive IGDB integration as the primary data source with optimized prioritization, combined with multiple backup sources for maximum reliability and coverage.

@@ -5,6 +5,7 @@ const axios = require('axios');
 const cors = require('cors');
 const NodeCache = require('node-cache');
 const admin = require('firebase-admin');
+const igdb = require('igdb-api-node').v3;
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -47,6 +48,8 @@ const historyCache = new NodeCache({ stdTTL: 604800 });
 const historyKey = 'recent_games';
 
 // API Configuration
+const IGDB_CLIENT_ID = process.env.IGDB_CLIENT_ID;
+const IGDB_CLIENT_SECRET = process.env.IGDB_CLIENT_SECRET;
 const RAWG_API_KEY = process.env.RAWG_API_KEY;
 const GIANT_BOMB_API_KEY = process.env.GIANT_BOMB_API_KEY;
 const THEGAMESDB_API_KEY = process.env.THEGAMESDB_API_KEY;
@@ -61,6 +64,56 @@ const steamStoreUrl = 'https://store.steampowered.com/api/appdetails';
 
 // Cache for Steam apps
 let steamApps = null;
+
+// IGDB API
+let igdbClient = null;
+let igdbToken = null;
+let igdbTokenExpiry = null;
+
+async function initializeIGDB() {
+  if (!IGDB_CLIENT_ID || !IGDB_CLIENT_SECRET) {
+    console.log('⚠️ IGDB credentials not configured');
+    return false;
+  }
+
+  try {
+    igdbClient = igdb(IGDB_CLIENT_ID, IGDB_CLIENT_SECRET);
+    console.log('✅ IGDB client initialized');
+    return true;
+  } catch (error) {
+    console.error('❌ IGDB initialization failed:', error.message);
+    return false;
+  }
+}
+
+async function getIGDBToken() {
+  if (igdbToken && igdbTokenExpiry && Date.now() < igdbTokenExpiry) {
+    return igdbToken;
+  }
+
+  try {
+    const response = await axios.post('https://api.igdb.com/oauth2/token', 
+      new URLSearchParams({
+        client_id: IGDB_CLIENT_ID,
+        client_secret: IGDB_CLIENT_SECRET,
+        grant_type: 'client_credentials'
+      }), {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      timeout: 10000
+    });
+
+    igdbToken = response.data.access_token;
+    igdbTokenExpiry = Date.now() + (response.data.expires_in * 1000) - 60000; // 1 minute buffer
+    
+    console.log('✅ IGDB token refreshed');
+    return igdbToken;
+  } catch (error) {
+    console.error('❌ IGDB token fetch failed:', error.message);
+    throw error;
+  }
+}
 
 // Steam apps list
 async function getSteamApps() {
@@ -246,6 +299,46 @@ async function fetchSteamGameDetails(appId) {
   return null;
 }
 
+async function fetchIGDBGames(endpoint, params = {}) {
+  if (!IGDB_CLIENT_ID || !IGDB_CLIENT_SECRET) throw new Error('IGDB credentials not configured');
+  
+  try {
+    await getIGDBToken();
+    
+    let query = '';
+    if (endpoint.startsWith('/games/')) {
+      // Get specific game by ID
+      const gameId = endpoint.replace('/games/', '');
+      query = `fields id,name,cover.url,rating,critic_rating,release_date,genres.name,platforms.name,summary,developers.name,publishers.name,tags.name; where id = ${gameId};`;
+    } else {
+      // Get games list
+      query = `fields id,name,cover.url,rating,critic_rating,release_date,genres.name,platforms.name,summary,developers.name,publishers.name,tags.name;`;
+      if (params.search) {
+        query += ` search "${params.search}";`;
+      } else {
+        query += ` sort rating desc;`;
+      }
+      if (params.limit) {
+        query += ` limit ${params.limit};`;
+      }
+    }
+    
+    const response = await axios.post('https://api.igdb.com/v4/games', query, {
+      headers: {
+        'Authorization': `Bearer ${igdbToken}`,
+        'Client-ID': IGDB_CLIENT_ID,
+        'Content-Type': 'text/plain'
+      },
+      timeout: 10000
+    });
+    
+    return response.data || [];
+  } catch (err) {
+    console.error('IGDB API error:', err.message);
+    return [];
+  }
+}
+
 // Video and Media Helpers
 async function getGameTrailers(game, source) {
   const trailers = [];
@@ -295,23 +388,22 @@ async function getGameTrailers(game, source) {
   }
 }
 
-// Enhanced Similar Games Fetcher
+// Enhanced Similar Games Fetcher (IGDB Priority)
 async function getSimilarGames(gameData, limit = 6) {
   const similar = [];
   
   try {
-    // Get similar games from RAWG if available
-    if (gameData.source === 'RAWG') {
-      const rawgId = gameData.id.replace('rawg_', '');
-      const similarGames = await fetchRawgGames(`/games/${rawgId}/suggested`, { 
-        page_size: limit 
+    // Get similar games from IGDB if available (Priority 1)
+    if (gameData.source === 'IGDB') {
+      const igdbId = gameData.id.replace('igdb_', '');
+      const igdbSimilar = await fetchIGDBGames(`/games/${igdbId}/suggested`, { 
+        limit: limit 
       });
       
-      if (similarGames && similarGames.results) {
+      if (igdbSimilar && igdbSimilar.length > 0) {
         const processedGames = await Promise.all(
-          similarGames.results.slice(0, limit).map(processRawgGame)
+          igdbSimilar.slice(0, limit).map(processIGDBGame)
         );
-        // Process as detailed games to match /games endpoint structure
         const detailedSimilar = await Promise.all(
           processedGames.map(processDetailedGame)
         );
@@ -319,26 +411,65 @@ async function getSimilarGames(gameData, limit = 6) {
       }
     }
     
-    // If we don't have enough similar games, get games by genre
-    if (similar.length < limit && gameData.main_genre && gameData.main_genre !== 'N/A') {
-      const genreGames = await fetchRawgGames('/games', {
-        genres: gameData.main_genre.toLowerCase().replace(/\s+/g, '-'),
-        page_size: limit * 2,
-        ordering: '-rating'
+    // Get similar games from RAWG if available (Priority 2)
+    if (gameData.source === 'RAWG' && similar.length < limit) {
+      const rawgId = gameData.id.replace('rawg_', '');
+      const similarGames = await fetchRawgGames(`/games/${rawgId}/suggested`, { 
+        page_size: limit 
       });
       
-      if (genreGames && genreGames.length > 0) {
+      if (similarGames && similarGames.results) {
         const processedGames = await Promise.all(
-          genreGames
-            .filter(g => g.name !== gameData.name) // Exclude current game
-            .slice(0, limit - similar.length)
-            .map(processRawgGame)
+          similarGames.results.slice(0, limit - similar.length).map(processRawgGame)
         );
-        // Process as detailed games to match /games endpoint structure
         const detailedSimilar = await Promise.all(
           processedGames.map(processDetailedGame)
         );
         similar.push(...detailedSimilar);
+      }
+    }
+    
+    // If we don't have enough similar games, get games by genre (IGDB first)
+    if (similar.length < limit && gameData.main_genre && gameData.main_genre !== 'N/A') {
+      // Try IGDB first
+      const igdbGenreGames = await fetchIGDBGames('/games', {
+        limit: limit * 2
+      });
+      
+      if (igdbGenreGames && igdbGenreGames.length > 0) {
+        const processedGames = await Promise.all(
+          igdbGenreGames
+            .filter(g => g.name !== gameData.name) // Exclude current game
+            .filter(g => g.genres && g.genres.some(genre => genre.name === gameData.main_genre))
+            .slice(0, limit - similar.length)
+            .map(processIGDBGame)
+        );
+        const detailedSimilar = await Promise.all(
+          processedGames.map(processDetailedGame)
+        );
+        similar.push(...detailedSimilar);
+      }
+      
+      // Fallback to RAWG if still need more
+      if (similar.length < limit) {
+        const rawgGenreGames = await fetchRawgGames('/games', {
+          genres: gameData.main_genre.toLowerCase().replace(/\s+/g, '-'),
+          page_size: limit * 2,
+          ordering: '-rating'
+        });
+        
+        if (rawgGenreGames && rawgGenreGames.length > 0) {
+          const processedGames = await Promise.all(
+            rawgGenreGames
+              .filter(g => g.name !== gameData.name) // Exclude current game
+              .slice(0, limit - similar.length)
+              .map(processRawgGame)
+          );
+          const detailedSimilar = await Promise.all(
+            processedGames.map(processDetailedGame)
+          );
+          similar.push(...detailedSimilar);
+        }
       }
     }
     
@@ -411,6 +542,27 @@ async function processTheGamesDbGame(game) {
   };
 }
 
+async function processIGDBGame(game) {
+  const coverImage = game.cover?.url ? `https:${game.cover.url.replace('thumb', 'cover_big')}` : 'N/A';
+  
+  return {
+    id: `igdb_${game.id}`,
+    source: 'IGDB',
+    name: game.name,
+    cover_image: coverImage,
+    rating: game.rating || 0,
+    critic_rating: game.critic_rating || 'N/A',
+    release_year: game.release_date ? new Date(game.release_date).getFullYear() : 'N/A',
+    main_genre: game.genres?.[0]?.name || 'N/A',
+    platforms: game.platforms ? game.platforms.map(p => p.name) : [],
+    description: game.summary || 'N/A',
+    developers: game.developers ? game.developers.map(d => d.name) : [],
+    publishers: game.publishers ? game.publishers.map(p => p.name) : [],
+    tags: game.tags ? game.tags.slice(0, 10).map(tag => tag.name) : [],
+    background_image: game.cover?.url ? `https:${game.cover.url}` : null
+  };
+}
+
 async function processSteamGame(game) {
   const steamDetails = await fetchSteamGameDetails(game.appid);
   
@@ -450,19 +602,27 @@ async function processDetailedGame(gameData) {
   };
 }
 
-// Combined API Fetcher
+// Combined API Fetcher (IGDB Priority)
 async function getAllGames(limit = 50) {
   const games = [];
   
   try {
-    // Fetch from RAWG
-    const rawgGames = await fetchRawgGames('/games', { 
-      page_size: Math.min(20, limit),
-      ordering: '-metacritic'
+    // Fetch from IGDB (Priority 1)
+    const igdbGames = await fetchIGDBGames('/games', { 
+      limit: Math.min(25, limit)
     });
-    games.push(...await Promise.all(rawgGames.map(processRawgGame)));
+    games.push(...await Promise.all(igdbGames.map(processIGDBGame)));
     
-    // Fetch from Giant Bomb (if we still need more games)
+    // Fetch from RAWG (Priority 2)
+    if (games.length < limit) {
+      const rawgGames = await fetchRawgGames('/games', { 
+        page_size: Math.min(20, limit - games.length),
+        ordering: '-metacritic'
+      });
+      games.push(...await Promise.all(rawgGames.map(processRawgGame)));
+    }
+    
+    // Fetch from Giant Bomb (Priority 3)
     if (games.length < limit) {
       const giantBombGames = await fetchGiantBombGames('/games', { 
         limit: Math.min(15, limit - games.length),
@@ -472,21 +632,21 @@ async function getAllGames(limit = 50) {
       games.push(...await Promise.all(giantBombGames.map(processGiantBombGame)));
     }
     
-    // Fetch from Steam (if we still need more games)
+    // Fetch from Steam (Priority 4)
     if (games.length < limit) {
       const steamGames = await getSteamApps();
       const randomSteamGames = steamGames
         .sort(() => Math.random() - 0.5)
-        .slice(0, Math.min(15, limit - games.length))
+        .slice(0, Math.min(10, limit - games.length))
         .map(app => ({ appid: app.appid, name: app.name }));
       
       games.push(...await Promise.all(randomSteamGames.map(processSteamGame)));
     }
     
-    // Fetch from TheGamesDB (if we still need more games)
+    // Fetch from TheGamesDB (Priority 5)
     if (games.length < limit) {
       const tgdbGames = await fetchTheGamesDbGames('/games', { 
-        limit: Math.min(10, limit - games.length)
+        limit: Math.min(8, limit - games.length)
       });
       games.push(...await Promise.all(tgdbGames.map(processTheGamesDbGame)));
     }
@@ -499,19 +659,30 @@ async function getAllGames(limit = 50) {
 }
 
 // Routes
-app.get('/health', (req, res) => res.json({ status: 'OK', sources: ['RAWG', 'GiantBomb', 'Steam', 'TheGamesDB'] }));
+app.get('/health', (req, res) => res.json({ status: 'OK', sources: ['IGDB', 'RAWG', 'GiantBomb', 'Steam', 'TheGamesDB'] }));
 
 app.get('/popular', async (req, res) => {
   const limit = parseInt(req.query.limit) || 10;
   
   try {
-    const rawgGames = await fetchRawgGames('/games', { 
-      page_size: limit,
-      ordering: '-metacritic'
+    // IGDB first priority for popular games
+    const igdbGames = await fetchIGDBGames('/games', { 
+      limit: limit
     });
     
-    const games = await Promise.all(rawgGames.map(processRawgGame));
-    res.json(games);
+    if (igdbGames.length > 0) {
+      const games = await Promise.all(igdbGames.map(processIGDBGame));
+      res.json(games);
+    } else {
+      // Fallback to RAWG if IGDB fails
+      const rawgGames = await fetchRawgGames('/games', { 
+        page_size: limit,
+        ordering: '-metacritic'
+      });
+      
+      const games = await Promise.all(rawgGames.map(processRawgGame));
+      res.json(games);
+    }
   } catch (err) {
     console.error('/popular ERROR:', err.message);
     res.status(500).json({ error: 'Failed to fetch popular games' });
@@ -527,19 +698,29 @@ app.get('/search', async (req, res) => {
   try {
     const results = [];
     
-    // Search RAWG
+    // Search RAWG first (Priority 1 for search)
     const rawgResults = await fetchRawgGames('/games', { 
       search: q, 
-      page_size: Math.min(5, limit)
+      page_size: Math.min(6, limit)
     });
     const rawgGames = await Promise.all(rawgResults.map(processRawgGame));
     results.push(...rawgGames);
+    
+    // Search IGDB (Priority 2)
+    if (results.length < limit) {
+      const igdbResults = await fetchIGDBGames('/games', { 
+        search: q,
+        limit: Math.min(4, limit - results.length)
+      });
+      const igdbGames = await Promise.all(igdbResults.map(processIGDBGame));
+      results.push(...igdbGames);
+    }
     
     // Search Giant Bomb (if we need more results)
     if (results.length < limit) {
       const giantBombResults = await fetchGiantBombGames('/games', { 
         search: q,
-        limit: Math.min(5, limit - results.length)
+        limit: Math.min(3, limit - results.length)
       });
       const giantBombGames = await Promise.all(giantBombResults.map(processGiantBombGame));
       results.push(...giantBombGames);
@@ -550,7 +731,7 @@ app.get('/search', async (req, res) => {
       const steamApps = await getSteamApps();
       const matchingSteamGames = steamApps
         .filter(app => app.name.toLowerCase().includes(q.toLowerCase()))
-        .slice(0, Math.min(3, limit - results.length))
+        .slice(0, Math.min(2, limit - results.length))
         .map(app => ({ appid: app.appid, name: app.name }));
       
       const steamGames = await Promise.all(matchingSteamGames.map(processSteamGame));
@@ -602,7 +783,14 @@ app.get('/games/:id', async (req, res) => {
     let gameData = null;
     let rawGameData = null;
     
-    if (gameId.startsWith('rawg_')) {
+    if (gameId.startsWith('igdb_')) {
+      const igdbId = gameId.replace('igdb_', '');
+      const igdbGames = await fetchIGDBGames(`/games/${igdbId}`);
+      if (igdbGames.length > 0) {
+        rawGameData = igdbGames[0];
+        gameData = await processIGDBGame(igdbGames[0]);
+      }
+    } else if (gameId.startsWith('rawg_')) {
       const rawgId = gameId.replace('rawg_', '');
       const rawgGame = await fetchRawgGames(`/games/${rawgId}`);
       if (rawgGame) {
@@ -746,6 +934,7 @@ app.delete('/games/:id/status/:status', authenticate, async (req, res) => {
 // New route to get API status
 app.get('/api-status', async (req, res) => {
   const status = {
+    IGDB: !!IGDB_CLIENT_ID && !!IGDB_CLIENT_SECRET,
     RAWG: !!RAWG_API_KEY,
     GiantBomb: !!GIANT_BOMB_API_KEY,
     TheGamesDB: !!THEGAMESDB_API_KEY,
@@ -759,7 +948,12 @@ app.get('/api-status', async (req, res) => {
 // Start server
 const server = app.listen(PORT, async () => {
   console.log(`🚀 Games API Server started on port ${PORT}`);
+  
+  // Initialize IGDB
+  await initializeIGDB();
+  
   console.log('📊 Available sources:', {
+    IGDB: !!IGDB_CLIENT_ID && !!IGDB_CLIENT_SECRET ? '✅ Configured' : '❌ Missing Credentials',
     RAWG: !!RAWG_API_KEY ? '✅ Configured' : '❌ Missing API Key',
     GiantBomb: !!GIANT_BOMB_API_KEY ? '✅ Configured' : '❌ Missing API Key',
     TheGamesDB: !!THEGAMESDB_API_KEY ? '✅ Configured' : '❌ Missing API Key',
