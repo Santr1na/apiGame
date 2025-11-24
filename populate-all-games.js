@@ -418,24 +418,20 @@ async function populateAllGames() {
     await initDatabase();
     console.log('');
 
-    // Fetch from all sources sequentially to avoid overwhelming APIs (Steam disabled)
-    console.log('📊 Step 1/4: IGDB (estimated: 15-30 min)');
-    const igdbGames = await fetchAllIGDBGames();
-    if (igdbGames.length > 0) await saveGames(igdbGames);
-    console.log('');
-
-    console.log('📊 Step 2/4: RAWG (estimated: 30-60 min)');
+    // Fetch from all sources sequentially to avoid overwhelming APIs (Steam & IGDB temporarily disabled)
+    console.log('📊 Step 1/3: RAWG (estimated: 30-60 min)');
     const rawgGames = await fetchAllRawgGames();
     if (rawgGames.length > 0) await saveGames(rawgGames);
     console.log('');
 
-    console.log('📊 Step 3/4: Giant Bomb (estimated: 10-20 min)');
+    console.log('📊 Step 2/3: Giant Bomb (estimated: 10-20 min)');
     const giantBombGames = await fetchAllGiantBombGames();
     if (giantBombGames.length > 0) await saveGames(giantBombGames);
     console.log('');
 
     // Steam API disabled due to endpoint unavailability
-    console.log('📊 Step 4/4: TheGamesDB (estimated: 20-30 min)');
+    // IGDB disabled - requires App Access Token (separate from Client ID/Secret)
+    console.log('📊 Step 3/3: TheGamesDB (estimated: 20-30 min)');
     const tgdbGames = await fetchAllTheGamesDbGames();
     if (tgdbGames.length > 0) await saveGames(tgdbGames);
     console.log('');

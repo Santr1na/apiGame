@@ -339,21 +339,21 @@ async function populateDatabase() {
     await initDatabase();
     console.log('');
 
-    // Fetch from all sources (Steam disabled)
-    const [igdbGames, rawgGames, giantBombGames, tgdbGames] = await Promise.all([
-      fetchIGDBGames(3),       // 3 pages = ~150 games
+    // Fetch from all sources (Steam & IGDB temporarily disabled)
+    const [rawgGames, giantBombGames, tgdbGames] = await Promise.all([
       fetchRawgGames(10),      // 10 pages = ~400 games (increased from 5)
       fetchGiantBombGames(3),  // 3 pages = ~300 games (increased from 2)
       // fetchSteamGames(300),   // Steam API disabled
+      // fetchIGDBGames(3),      // IGDB disabled - requires App Access Token
       fetchTheGamesDbGames(3)  // 3 pages = ~150 games (increased from 2)
     ]);
 
-    // Combine all games (excluding Steam for now)
+    // Combine all games (Steam & IGDB temporarily disabled)
     const allGames = [
-      ...igdbGames,
       ...rawgGames,
       ...giantBombGames,
       // ...steamGames,  // Steam API disabled
+      // ...igdbGames,   // IGDB disabled - requires App Access Token
       ...tgdbGames
     ];
 
