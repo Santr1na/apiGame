@@ -1,3 +1,4 @@
+require('dotenv').config();
 const axios = require('axios');
 const {
   initDatabase,
@@ -16,8 +17,10 @@ const THEGAMESDB_API_KEY = process.env.THEGAMESDB_API_KEY;
 const rawgBaseUrl = 'https://api.rawg.io/api';
 const giantBombBaseUrl = 'https://www.giantbomb.com/api';
 const theGamesDbBaseUrl = 'https://api.thegamesdb.net/v1';
-const steamAppsUrl = 'https://api.steampowered.com/ISteamApps/GetAppList/v2/';
-const steamStoreUrl = 'https://store.steampowered.com/api/appdetails';
+
+// Note: Steam API is temporarily disabled as the endpoint is no longer available
+// const steamAppsUrl = 'https://api.steampowered.com/ISteamApps/GetAppList/v2/';
+// const steamStoreUrl = 'https://store.steampowered.com/api/appdetails';
 
 // Delay helper to avoid rate limits
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -127,8 +130,13 @@ async function fetchGiantBombGames(pages = 3) {
   }
 }
 
-// Fetch from Steam
+// Fetch from Steam (TEMPORARILY DISABLED)
+// Steam API endpoint is no longer available - GetAppList method not found
 async function fetchSteamGames(limit = 500) {
+  console.log('⚠️ Steam API is temporarily disabled (endpoint no longer available)');
+  return [];
+  /*
+  // Previous implementation removed due to API endpoint being unavailable
   console.log('📥 Fetching games from Steam...');
   const games = [];
 
@@ -177,6 +185,7 @@ async function fetchSteamGames(limit = 500) {
     console.error('❌ Steam fetch error:', err.message);
     return games;
   }
+  */
 }
 
 // Fetch from TheGamesDB
@@ -238,19 +247,19 @@ async function populateDatabase() {
     await initDatabase();
     console.log('');
 
-    // Fetch from all sources
-    const [rawgGames, giantBombGames, steamGames, tgdbGames] = await Promise.all([
-      fetchRawgGames(5),      // 5 pages = ~200 games
-      fetchGiantBombGames(2), // 2 pages = ~200 games
-      fetchSteamGames(300),   // 300 popular games
-      fetchTheGamesDbGames(2) // 2 pages = ~100 games
+    // Fetch from all sources (Steam disabled)
+    const [rawgGames, giantBombGames, tgdbGames] = await Promise.all([
+      fetchRawgGames(10),      // 10 pages = ~400 games (increased from 5)
+      fetchGiantBombGames(3),  // 3 pages = ~300 games (increased from 2)
+      // fetchSteamGames(300),   // Steam API disabled
+      fetchTheGamesDbGames(3)  // 3 pages = ~150 games (increased from 2)
     ]);
 
-    // Combine all games
+    // Combine all games (excluding Steam for now)
     const allGames = [
       ...rawgGames,
       ...giantBombGames,
-      ...steamGames,
+      // ...steamGames,  // Steam API disabled
       ...tgdbGames
     ];
 
