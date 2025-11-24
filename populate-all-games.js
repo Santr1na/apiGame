@@ -11,6 +11,7 @@ const {
 // API Configuration
 const IGDB_CLIENT_ID = process.env.IGDB_CLIENT_ID;
 const IGDB_CLIENT_SECRET = process.env.IGDB_CLIENT_SECRET;
+const IGDB_ACCESS_TOKEN = process.env.IGDB_ACCESS_TOKEN;
 const RAWG_API_KEY = process.env.RAWG_API_KEY;
 const GIANT_BOMB_API_KEY = process.env.GIANT_BOMB_API_KEY;
 const THEGAMESDB_API_KEY = process.env.THEGAMESDB_API_KEY;
@@ -28,40 +29,18 @@ let igdbTokenExpiry = null;
 // Delay helper to avoid rate limits
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// IGDB Token Management
-async function getIGDBToken() {
-  if (igdbToken && igdbTokenExpiry && Date.now() < igdbTokenExpiry) {
-    return igdbToken;
+// IGDB Token Management - используем App Access Token напрямую
+function getIGDBToken() {
+  if (!IGDB_ACCESS_TOKEN) {
+    throw new Error('IGDB_ACCESS_TOKEN не найден в .env файле');
   }
-
-  try {
-    const response = await axios.post('https://api.igdb.com/oauth2/token', 
-      new URLSearchParams({
-        client_id: IGDB_CLIENT_ID,
-        client_secret: IGDB_CLIENT_SECRET,
-        grant_type: 'client_credentials'
-      }), {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      timeout: 10000
-    });
-
-    igdbToken = response.data.access_token;
-    igdbTokenExpiry = Date.now() + (response.data.expires_in * 1000) - 60000; // 1 minute buffer
-    
-    console.log('✅ IGDB token refreshed');
-    return igdbToken;
-  } catch (error) {
-    console.error('❌ IGDB token fetch failed:', error.message);
-    throw error;
-  }
+  return IGDB_ACCESS_TOKEN;
 }
 
 // Fetch ALL games from IGDB
 async function fetchAllIGDBGames() {
-  if (!IGDB_CLIENT_ID || !IGDB_CLIENT_SECRET) {
-    console.log('⚠️ IGDB credentials not configured, skipping...');
+  if (!IGDB_ACCESS_TOKEN) {
+    console.log('⚠️ IGDB_ACCESS_TOKEN не настроен, пропускаем...');
     return [];
   }
 
@@ -72,12 +51,12 @@ async function fetchAllIGDBGames() {
   const maxRequests = 1000; // Maximum requests to avoid timeout
 
   try {
+    const igdbToken = getIGDBToken();
+    
     for (let request = 0; request < maxRequests && offset < 50000; request++) {
       console.log(`  Request ${request + 1}/${maxRequests}, offset ${offset}...`);
       
-      await getIGDBToken();
-      
-      const query = `fields id,name,cover.url,rating,critic_rating,release_date,genres.name,platforms.name,summary; limit ${limit}; offset ${offset};`;
+      const query = `fields id,name,cover.url,rating,first_release_date,genres.name,platforms.name,summary; limit ${limit}; offset ${offset};`;
       
       const response = await axios.post('https://api.igdb.com/v4/games', query, {
         headers: {
@@ -102,8 +81,8 @@ async function fetchAllIGDBGames() {
           name: game.name,
           cover_image: game.cover?.url ? `https:${game.cover.url.replace('thumb', 'cover_big')}` : 'N/A',
           rating: game.rating || 0,
-          critic_rating: game.critic_rating || 'N/A',
-          release_year: game.release_date ? new Date(game.release_date * 1000).getFullYear() : 'N/A',
+          critic_rating: Math.round((game.rating || 0) * 20) || 'N/A', // Используем rating как critic_rating
+          release_year: game.first_release_date ? new Date(game.first_release_date * 1000).getFullYear() : 'N/A',
           main_genre: game.genres?.[0]?.name || 'N/A',
           platforms: game.platforms ? game.platforms.map(p => p.name) : [],
           description: game.summary || game.name
@@ -419,19 +398,24 @@ async function populateAllGames() {
     console.log('');
 
     // Fetch from all sources sequentially to avoid overwhelming APIs (Steam & IGDB temporarily disabled)
-    console.log('📊 Step 1/3: RAWG (estimated: 30-60 min)');
+    console.log('📊 Step 1/4: IGDB (estimated: 15-30 min)');
+    const igdbGames = await fetchAllIGDBGames();
+    if (igdbGames.length > 0) await saveGames(igdbGames);
+    console.log('');
+
+    console.log('📊 Step 2/4: RAWG (estimated: 30-60 min)');
     const rawgGames = await fetchAllRawgGames();
     if (rawgGames.length > 0) await saveGames(rawgGames);
     console.log('');
 
-    console.log('📊 Step 2/3: Giant Bomb (estimated: 10-20 min)');
+    console.log('📊 Step 3/4: Giant Bomb (estimated: 10-20 min)');
     const giantBombGames = await fetchAllGiantBombGames();
     if (giantBombGames.length > 0) await saveGames(giantBombGames);
     console.log('');
 
     // Steam API disabled due to endpoint unavailability
     // IGDB disabled - requires App Access Token (separate from Client ID/Secret)
-    console.log('📊 Step 3/3: TheGamesDB (estimated: 20-30 min)');
+    console.log('📊 Step 4/4: TheGamesDB (estimated: 20-30 min)');
     const tgdbGames = await fetchAllTheGamesDbGames();
     if (tgdbGames.length > 0) await saveGames(tgdbGames);
     console.log('');

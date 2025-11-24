@@ -11,6 +11,7 @@ const {
 // API Configuration
 const IGDB_CLIENT_ID = process.env.IGDB_CLIENT_ID;
 const IGDB_CLIENT_SECRET = process.env.IGDB_CLIENT_SECRET;
+const IGDB_ACCESS_TOKEN = process.env.IGDB_ACCESS_TOKEN;
 const RAWG_API_KEY = process.env.RAWG_API_KEY;
 const GIANT_BOMB_API_KEY = process.env.GIANT_BOMB_API_KEY;
 const THEGAMESDB_API_KEY = process.env.THEGAMESDB_API_KEY;
@@ -31,40 +32,18 @@ let igdbTokenExpiry = null;
 // Delay helper to avoid rate limits
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// IGDB Token Management
-async function getIGDBToken() {
-  if (igdbToken && igdbTokenExpiry && Date.now() < igdbTokenExpiry) {
-    return igdbToken;
+// IGDB Token Management - используем App Access Token напрямую
+function getIGDBToken() {
+  if (!IGDB_ACCESS_TOKEN) {
+    throw new Error('IGDB_ACCESS_TOKEN не найден в .env файле');
   }
-
-  try {
-    const response = await axios.post('https://api.igdb.com/oauth2/token', 
-      new URLSearchParams({
-        client_id: IGDB_CLIENT_ID,
-        client_secret: IGDB_CLIENT_SECRET,
-        grant_type: 'client_credentials'
-      }), {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      timeout: 10000
-    });
-
-    igdbToken = response.data.access_token;
-    igdbTokenExpiry = Date.now() + (response.data.expires_in * 1000) - 60000; // 1 minute buffer
-    
-    console.log('✅ IGDB token refreshed');
-    return igdbToken;
-  } catch (error) {
-    console.error('❌ IGDB token fetch failed:', error.message);
-    throw error;
-  }
+  return IGDB_ACCESS_TOKEN;
 }
 
 // Fetch games from IGDB
 async function fetchIGDBGames(pages = 3) {
-  if (!IGDB_CLIENT_ID || !IGDB_CLIENT_SECRET) {
-    console.log('⚠️ IGDB credentials not configured, skipping...');
+  if (!IGDB_ACCESS_TOKEN) {
+    console.log('⚠️ IGDB_ACCESS_TOKEN не настроен, пропускаем...');
     return [];
   }
 
@@ -72,12 +51,12 @@ async function fetchIGDBGames(pages = 3) {
   const games = [];
 
   try {
+    const igdbToken = getIGDBToken();
+    
     for (let page = 1; page <= pages; page++) {
       console.log(`  Page ${page}/${pages}...`);
       
-      await getIGDBToken();
-      
-      const query = `fields id,name,cover.url,rating,critic_rating,release_date,genres.name,platforms.name,summary; sort rating desc; limit 50; offset ${(page - 1) * 50};`;
+      const query = `fields id,name,cover.url,rating,first_release_date,genres.name,platforms.name,summary; sort rating desc; limit 50; offset ${(page - 1) * 50};`;
       
       const response = await axios.post('https://api.igdb.com/v4/games', query, {
         headers: {
@@ -97,8 +76,8 @@ async function fetchIGDBGames(pages = 3) {
           name: game.name,
           cover_image: game.cover?.url ? `https:${game.cover.url.replace('thumb', 'cover_big')}` : 'N/A',
           rating: game.rating || 0,
-          critic_rating: game.critic_rating || 'N/A',
-          release_year: game.release_date ? new Date(game.release_date * 1000).getFullYear() : 'N/A',
+          critic_rating: Math.round((game.rating || 0) * 20) || 'N/A', // Используем rating как critic_rating
+          release_year: game.first_release_date ? new Date(game.first_release_date * 1000).getFullYear() : 'N/A',
           main_genre: game.genres?.[0]?.name || 'N/A',
           platforms: game.platforms ? game.platforms.map(p => p.name) : [],
           description: game.summary || game.name
@@ -339,8 +318,9 @@ async function populateDatabase() {
     await initDatabase();
     console.log('');
 
-    // Fetch from all sources (Steam & IGDB temporarily disabled)
-    const [rawgGames, giantBombGames, tgdbGames] = await Promise.all([
+    // Fetch from all sources (Steam disabled, IGDB enabled)
+    const [igdbGames, rawgGames, giantBombGames, tgdbGames] = await Promise.all([
+      fetchIGDBGames(3),       // 3 pages = ~150 games
       fetchRawgGames(10),      // 10 pages = ~400 games (increased from 5)
       fetchGiantBombGames(3),  // 3 pages = ~300 games (increased from 2)
       // fetchSteamGames(300),   // Steam API disabled
@@ -353,7 +333,7 @@ async function populateDatabase() {
       ...rawgGames,
       ...giantBombGames,
       // ...steamGames,  // Steam API disabled
-      // ...igdbGames,   // IGDB disabled - requires App Access Token
+      ...igdbGames,     // IGDB enabled with App Access Token
       ...tgdbGames
     ];
 
