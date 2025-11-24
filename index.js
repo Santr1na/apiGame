@@ -5,7 +5,6 @@ const axios = require('axios');
 const cors = require('cors');
 const NodeCache = require('node-cache');
 const admin = require('firebase-admin');
-const igdb = require('igdb-api-node').v3;
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -66,7 +65,6 @@ const steamStoreUrl = 'https://store.steampowered.com/api/appdetails';
 let steamApps = null;
 
 // IGDB API
-let igdbClient = null;
 let igdbToken = null;
 let igdbTokenExpiry = null;
 
@@ -77,7 +75,8 @@ async function initializeIGDB() {
   }
 
   try {
-    igdbClient = igdb(IGDB_CLIENT_ID, IGDB_CLIENT_SECRET);
+    // Test IGDB connection by getting a token
+    await getIGDBToken();
     console.log('✅ IGDB client initialized');
     return true;
   } catch (error) {
