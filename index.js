@@ -300,7 +300,10 @@ async function fetchSteamGameDetails(appId) {
 }
 
 async function fetchIGDBGames(endpoint, params = {}) {
-  if (!IGDB_CLIENT_ID || !IGDB_CLIENT_SECRET) throw new Error('IGDB credentials not configured');
+  if (!IGDB_CLIENT_ID || !IGDB_CLIENT_SECRET) {
+    console.log('⚠️ IGDB credentials not configured, skipping IGDB');
+    return [];
+  }
   
   try {
     await getIGDBToken();
