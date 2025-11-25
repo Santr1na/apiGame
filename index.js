@@ -650,7 +650,19 @@ async function processGame(g) {
 async function getGameCover(name, platforms, fallbackUrl) {
   // If we have a good fallback URL, use it
   if (fallbackUrl && fallbackUrl !== 'N/A') {
-    return fallbackUrl;
+    // Исправляем дублирование https:
+    if (fallbackUrl.startsWith('https:https://')) {
+      return fallbackUrl.replace('https:https://', 'https://');
+    }
+    if (fallbackUrl.startsWith('http:http://')) {
+      return fallbackUrl.replace('http:http://', 'http://');
+    }
+    // Если URL уже правильный, возвращаем как есть
+    if (fallbackUrl.startsWith('http://') || fallbackUrl.startsWith('https://')) {
+      return fallbackUrl;
+    }
+    // Добавляем протокол только если его нет
+    return `https:${fallbackUrl}`;
   }
   
   // Try to find on Steam if available
