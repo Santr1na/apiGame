@@ -309,12 +309,12 @@ async function fetchIGDBGames(endpoint, params = {}) {
     
     let query = '';
     if (endpoint.startsWith('/games/')) {
-      // Get specific game by ID
+      // Get specific game by ID with all required fields for processGame
       const gameId = endpoint.replace('/games/', '');
-      query = `fields id,name,cover.url,rating,critic_rating,release_date,genres.name,platforms.name,summary,developers.name,publishers.name,tags.name; where id = ${gameId};`;
+      query = `fields id,name,genres.name,platforms.name,release_dates.date,aggregated_rating,rating,cover.url,age_ratings.rating,summary,involved_companies.company.name,videos.video_id,similar_games.id,similar_games.name,similar_games.cover.url,similar_games.aggregated_rating,similar_games.release_dates.date,similar_games.genres.name,similar_games.platforms.name; where id = ${gameId}; limit 1;`;
     } else {
       // Get games list
-      query = `fields id,name,cover.url,rating,critic_rating,release_date,genres.name,platforms.name,summary,developers.name,publishers.name,tags.name;`;
+      query = `fields id,name,genres.name,platforms.name,release_dates.date,aggregated_rating,rating,cover.url,age_ratings.rating,summary,involved_companies.company.name,videos.video_id,similar_games.id,similar_games.name,similar_games.cover.url,similar_games.aggregated_rating,similar_games.release_dates.date,similar_games.genres.name,similar_games.platforms.name;`;
       if (params.search) {
         query += ` search "${params.search}";`;
       } else {
@@ -585,6 +585,70 @@ async function processSteamGame(game) {
     tags: steamDetails?.genres ? steamDetails.genres.map(g => g.description) : [],
     background_image: steamDetails?.header_image || null
   };
+}
+
+// Process game data according to the specified structure
+async function processGame(g) {
+  const favs = await loadFavoriteCounts();
+  const stats = await loadStatusCounts();
+  const st = stats[g.id] || {};
+  const cover = g.cover ? `https:${g.cover.url}` : 'N/A';
+  const plats = g.platforms ? g.platforms.map(p => p.name) : [];
+  const genres = g.genres ? g.genres.map(gg => gg.name) : [];
+  const similar = g.similar_games?.length ? await Promise.all(g.similar_games.slice(0, 3).map(async s => {
+    const sc = s.cover ? `https:${s.cover.url}` : 'N/A';
+    const sp = s.platforms ? s.platforms.map(p => p.name) : [];
+    return { 
+      id: s.id, 
+      name: s.name, 
+      cover_image: await getGameCover(s.name, sp, sc), 
+      critic_rating: Math.round(s.aggregated_rating || 0) || 'N/A', 
+      release_year: s.release_dates?.[0]?.date ? new Date(s.release_dates[0].date * 1000).getFullYear() : 'N/A', 
+      main_genre: s.genres?.[0]?.name || 'N/A', 
+      platforms: sp 
+    };
+  })) : [];
+  
+  return {
+    id: g.id, 
+    name: g.name, 
+    genres, 
+    platforms: plats,
+    release_date: g.release_dates?.[0]?.date ? new Date(g.release_dates[0].date * 1000).toISOString().split('T')[0] : 'N/A',
+    rating: Math.round(g.aggregated_rating || g.rating || 0) || 'N/A',
+    rating_type: g.aggregated_rating ? 'Critics' : 'Users',
+    cover_image: await getGameCover(g.name, plats, cover),
+    age_ratings: g.age_ratings ? g.age_ratings.map(r => ({1:'ESRB: EC',2:'ESRB: E',3:'ESRB: E10+',4:'ESRB: T',5:'ESRB: M',6:'ESRB: AO',7:'PEGI: 3',8:'PEGI: 7',9:'PEGI: 12',10:'PEGI: 16',11:'PEGI: 18'}[r.rating] || 'N/A')) : ['N/A'],
+    summary: g.summary || 'N/A',
+    developers: g.involved_companies ? g.involved_companies.map(c => c.company.name) : ['N/A'],
+    videos: g.videos ? g.videos.map(v => `https://www.youtube.com/watch?v=${v.video_id}`).slice(0,3) : ['N/A'],
+    similar_games: similar,
+    favorite: favs[g.id] || 0,
+    playing: st.playing || 0, 
+    ill_play: st.ill_play || 0, 
+    passed: st.passed || 0, 
+    postponed: st.postponed || 0, 
+    abandoned: st.abandoned || 0
+  };
+}
+
+// Helper function to get game cover image
+async function getGameCover(name, platforms, fallbackUrl) {
+  // If we have a good fallback URL, use it
+  if (fallbackUrl && fallbackUrl !== 'N/A') {
+    return fallbackUrl;
+  }
+  
+  // Try to find on Steam if available
+  if (platforms.includes('PC')) {
+    const steamApps = await getSteamApps();
+    const steamApp = steamApps.find(app => app.name.toLowerCase() === name.toLowerCase());
+    if (steamApp) {
+      return await getSteamCover(name, steamApp.appid);
+    }
+  }
+  
+  return 'N/A';
 }
 
 async function processDetailedGame(gameData) {
@@ -862,6 +926,65 @@ app.get('/games/:id', async (req, res) => {
   } catch (err) {
     console.error('/games/:id ERROR:', err.message);
     res.status(500).json({ error: 'Failed to fetch game details' });
+  }
+});
+
+// New endpoint with the exact processGame structure
+app.get('/games/:id/processed', async (req, res) => {
+  const gameId = req.params.id;
+  
+  try {
+    let gameData = null;
+    
+    if (gameId.startsWith('igdb_')) {
+      const igdbId = gameId.replace('igdb_', '');
+      const igdbGames = await fetchIGDBGames(`/games/${igdbId}`);
+      if (igdbGames.length > 0) {
+        // Enhance the game data with similar games for the processGame function
+        const enhancedGame = {
+          ...igdbGames[0],
+          similar_games: await fetchIGDBGames(`/games/${igdbId}/suggested`, { limit: 3 }) || [],
+          videos: [], // Would need additional API call to get videos
+          age_ratings: [], // Would need additional API call to get age ratings
+          involved_companies: igdbGames[0].involved_companies || []
+        };
+        gameData = await processGame(enhancedGame);
+      }
+    } else {
+      // For other sources, try to convert to IGDB-like format
+      if (gameId.startsWith('rawg_')) {
+        const rawgId = gameId.replace('rawg_', '');
+        const rawgGame = await fetchRawgGames(`/games/${rawgId}`);
+        if (rawgGame) {
+          // Convert RAWG format to IGDB-like format for processGame
+          const convertedGame = {
+            id: rawgGame.id,
+            name: rawgGame.name,
+            cover: { url: rawgGame.background_image?.replace('media/', 'media/crop/600/400/') },
+            rating: rawgGame.rating,
+            aggregated_rating: rawgGame.metacritic,
+            release_dates: rawgGame.released ? [{ date: Math.floor(new Date(rawgGame.released).getTime() / 1000) }] : [],
+            genres: rawgGame.genres?.map(g => ({ name: g.name })) || [],
+            platforms: rawgGame.platforms?.map(p => ({ name: p.platform.name })) || [],
+            summary: rawgGame.description_raw || '',
+            videos: rawgGame.clip ? [{ video_id: rawgGame.clip.clip?.split('v=')[1] }] : [],
+            age_ratings: [],
+            involved_companies: rawgGame.developers?.map(d => ({ company: { name: d.name } })) || [],
+            similar_games: [] // Would need additional API call
+          };
+          gameData = await processGame(convertedGame);
+        }
+      }
+    }
+    
+    if (!gameData) {
+      return res.status(404).json({ error: 'Game not found or format not supported' });
+    }
+    
+    res.json(gameData);
+  } catch (err) {
+    console.error('/games/:id/processed ERROR:', err.message);
+    res.status(500).json({ error: 'Failed to process game data' });
   }
 });
 

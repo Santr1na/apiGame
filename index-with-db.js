@@ -47,6 +47,8 @@ const historyCache = new NodeCache({ stdTTL: 604800 });
 const historyKey = 'recent_games';
 
 // API Configuration
+const IGDB_CLIENT_ID = process.env.IGDB_CLIENT_ID;
+const IGDB_CLIENT_SECRET = process.env.IGDB_CLIENT_SECRET;
 const RAWG_API_KEY = process.env.RAWG_API_KEY;
 const GIANT_BOMB_API_KEY = process.env.GIANT_BOMB_API_KEY;
 const THEGAMESDB_API_KEY = process.env.THEGAMESDB_API_KEY;
@@ -61,6 +63,99 @@ const steamStoreUrl = 'https://store.steampowered.com/api/appdetails';
 
 // Cache for Steam apps
 let steamApps = null;
+
+// IGDB API
+let igdbToken = null;
+let igdbTokenExpiry = null;
+
+async function initializeIGDB() {
+  if (!IGDB_CLIENT_ID || !IGDB_CLIENT_SECRET) {
+    console.log('⚠️ IGDB credentials not configured');
+    return false;
+  }
+
+  try {
+    // Test IGDB connection by getting a token
+    await getIGDBToken();
+    console.log('✅ IGDB client initialized');
+    return true;
+  } catch (error) {
+    console.error('❌ IGDB initialization failed:', error.message);
+    return false;
+  }
+}
+
+async function getIGDBToken() {
+  if (igdbToken && igdbTokenExpiry && Date.now() < igdbTokenExpiry) {
+    return igdbToken;
+  }
+
+  try {
+    const response = await axios.post('https://api.igdb.com/oauth2/token', 
+      new URLSearchParams({
+        client_id: IGDB_CLIENT_ID,
+        client_secret: IGDB_CLIENT_SECRET,
+        grant_type: 'client_credentials'
+      }), {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      timeout: 10000
+    });
+
+    igdbToken = response.data.access_token;
+    igdbTokenExpiry = Date.now() + (response.data.expires_in * 1000) - 60000; // 1 minute buffer
+    
+    console.log('✅ IGDB token refreshed');
+    return igdbToken;
+  } catch (error) {
+    console.error('❌ IGDB token fetch failed:', error.message);
+    throw error;
+  }
+}
+
+async function fetchIGDBGames(endpoint, params = {}) {
+  if (!IGDB_CLIENT_ID || !IGDB_CLIENT_SECRET) {
+    console.log('⚠️ IGDB credentials not configured, skipping IGDB');
+    return [];
+  }
+  
+  try {
+    await getIGDBToken();
+    
+    let query = '';
+    if (endpoint.startsWith('/games/')) {
+      // Get specific game by ID with all required fields for processGame
+      const gameId = endpoint.replace('/games/', '');
+      query = `fields id,name,genres.name,platforms.name,release_dates.date,aggregated_rating,rating,cover.url,age_ratings.rating,summary,involved_companies.company.name,videos.video_id,similar_games.id,similar_games.name,similar_games.cover.url,similar_games.aggregated_rating,similar_games.release_dates.date,similar_games.genres.name,similar_games.platforms.name; where id = ${gameId}; limit 1;`;
+    } else {
+      // Get games list
+      query = `fields id,name,genres.name,platforms.name,release_dates.date,aggregated_rating,rating,cover.url,age_ratings.rating,summary,involved_companies.company.name,videos.video_id,similar_games.id,similar_games.name,similar_games.cover.url,similar_games.aggregated_rating,similar_games.release_dates.date,similar_games.genres.name,similar_games.platforms.name;`;
+      if (params.search) {
+        query += ` search "${params.search}";`;
+      } else {
+        query += ` sort rating desc;`;
+      }
+      if (params.limit) {
+        query += ` limit ${params.limit};`;
+      }
+    }
+    
+    const response = await axios.post('https://api.igdb.com/v4/games', query, {
+      headers: {
+        'Authorization': `Bearer ${igdbToken}`,
+        'Client-ID': IGDB_CLIENT_ID,
+        'Content-Type': 'text/plain'
+      },
+      timeout: 10000
+    });
+    
+    return response.data || [];
+  } catch (err) {
+    console.error('IGDB API error:', err.message);
+    return [];
+  }
+}
 
 // Steam apps list
 async function getSteamApps() {
@@ -212,6 +307,70 @@ async function processRawgGame(game) {
     platforms: game.platforms ? game.platforms.map(p => p.platform.name) : [],
     description: game.description_raw || 'N/A'
   };
+}
+
+// Process game data according to the specified structure
+async function processGame(g) {
+  const favs = await loadFavoriteCounts();
+  const stats = await loadStatusCounts();
+  const st = stats[g.id] || {};
+  const cover = g.cover ? `https:${g.cover.url}` : 'N/A';
+  const plats = g.platforms ? g.platforms.map(p => p.name) : [];
+  const genres = g.genres ? g.genres.map(gg => gg.name) : [];
+  const similar = g.similar_games?.length ? await Promise.all(g.similar_games.slice(0, 3).map(async s => {
+    const sc = s.cover ? `https:${s.cover.url}` : 'N/A';
+    const sp = s.platforms ? s.platforms.map(p => p.name) : [];
+    return { 
+      id: s.id, 
+      name: s.name, 
+      cover_image: await getGameCover(s.name, sp, sc), 
+      critic_rating: Math.round(s.aggregated_rating || 0) || 'N/A', 
+      release_year: s.release_dates?.[0]?.date ? new Date(s.release_dates[0].date * 1000).getFullYear() : 'N/A', 
+      main_genre: s.genres?.[0]?.name || 'N/A', 
+      platforms: sp 
+    };
+  })) : [];
+  
+  return {
+    id: g.id, 
+    name: g.name, 
+    genres, 
+    platforms: plats,
+    release_date: g.release_dates?.[0]?.date ? new Date(g.release_dates[0].date * 1000).toISOString().split('T')[0] : 'N/A',
+    rating: Math.round(g.aggregated_rating || g.rating || 0) || 'N/A',
+    rating_type: g.aggregated_rating ? 'Critics' : 'Users',
+    cover_image: await getGameCover(g.name, plats, cover),
+    age_ratings: g.age_ratings ? g.age_ratings.map(r => ({1:'ESRB: EC',2:'ESRB: E',3:'ESRB: E10+',4:'ESRB: T',5:'ESRB: M',6:'ESRB: AO',7:'PEGI: 3',8:'PEGI: 7',9:'PEGI: 12',10:'PEGI: 16',11:'PEGI: 18'}[r.rating] || 'N/A')) : ['N/A'],
+    summary: g.summary || 'N/A',
+    developers: g.involved_companies ? g.involved_companies.map(c => c.company.name) : ['N/A'],
+    videos: g.videos ? g.videos.map(v => `https://www.youtube.com/watch?v=${v.video_id}`).slice(0,3) : ['N/A'],
+    similar_games: similar,
+    favorite: favs[g.id] || 0,
+    playing: st.playing || 0, 
+    ill_play: st.ill_play || 0, 
+    passed: st.passed || 0, 
+    postponed: st.postponed || 0, 
+    abandoned: st.abandoned || 0
+  };
+}
+
+// Helper function to get game cover image
+async function getGameCover(name, platforms, fallbackUrl) {
+  // If we have a good fallback URL, use it
+  if (fallbackUrl && fallbackUrl !== 'N/A') {
+    return fallbackUrl;
+  }
+  
+  // Try to find on Steam if available
+  if (platforms.includes('PC')) {
+    const steamApps = await getSteamApps();
+    const steamApp = steamApps.find(app => app.name.toLowerCase() === name.toLowerCase());
+    if (steamApp) {
+      return await getSteamCover(name, steamApp.appid);
+    }
+  }
+  
+  return 'N/A';
 }
 
 async function processDetailedGame(gameData) {
@@ -414,6 +573,124 @@ app.get('/games/:id', async (req, res) => {
   }
 });
 
+// New endpoint with the exact processGame structure (database-first approach)
+app.get('/games/:id/processed', async (req, res) => {
+  const gameId = req.params.id;
+  
+  try {
+    let gameData = null;
+    
+    // Try database first
+    if (USE_DATABASE) {
+      gameData = await getGameById(gameId);
+      if (gameData) {
+        console.log(`📊 Found game ${gameId} in database for processGame`);
+        
+        // Convert database format to IGDB-like format for processGame
+        const convertedGame = {
+          id: gameData.id,
+          name: gameData.name,
+          cover: { url: gameData.cover_image?.replace('media/', 'media/crop/600/400/') },
+          rating: gameData.rating,
+          aggregated_rating: gameData.critic_rating,
+          release_dates: gameData.release_year ? [{ date: Math.floor(new Date(`${gameData.release_year}-01-01`).getTime() / 1000) }] : [],
+          genres: gameData.main_genre ? [{ name: gameData.main_genre }] : [],
+          platforms: gameData.platforms ? gameData.platforms.map(p => ({ name: p })) : [],
+          summary: gameData.description || 'N/A',
+          videos: [], // Database doesn't store videos
+          age_ratings: [], // Database doesn't store age ratings
+          involved_companies: gameData.developers ? gameData.developers.map(d => ({ company: { name: d } })) : [],
+          similar_games: [] // Database doesn't store similar games
+        };
+        
+        const processedGame = await processGame(convertedGame);
+        res.json(processedGame);
+        return;
+      }
+    }
+    
+    // Fallback to API if not in database
+    console.log(`📡 Fetching game ${gameId} from API for processGame`);
+    
+    if (gameId.startsWith('igdb_')) {
+      const igdbId = gameId.replace('igdb_', '');
+      const igdbGames = await fetchIGDBGames(`/games/${igdbId}`);
+      
+      if (igdbGames.length > 0) {
+        const enhancedGame = {
+          ...igdbGames[0],
+          similar_games: igdbGames[0].similar_games || [],
+          videos: igdbGames[0].videos || [],
+          age_ratings: igdbGames[0].age_ratings || [],
+          involved_companies: igdbGames[0].involved_companies || []
+        };
+        gameData = await processGame(enhancedGame);
+        
+        // Save to database for future use
+        if (USE_DATABASE) {
+          const dbGameData = await processRawgGame({ 
+            id: igdbGames[0].id, 
+            name: igdbGames[0].name,
+            background_image: igdbGames[0].cover?.url,
+            rating: igdbGames[0].rating,
+            metacritic: igdbGames[0].aggregated_rating,
+            released: igdbGames[0].release_dates?.[0]?.date ? new Date(igdbGames[0].release_dates[0].date * 1000).toISOString().split('T')[0] : null,
+            genres: igdbGames[0].genres?.map(g => ({ name: g.name })) || [],
+            platforms: igdbGames[0].platforms?.map(p => ({ platform: { name: p.name } })) || [],
+            description_raw: igdbGames[0].summary || '',
+            developers: igdbGames[0].involved_companies?.map(c => ({ name: c.company.name })) || []
+          });
+          dbGameData.id = `igdb_${igdbId}`;
+          dbGameData.source = 'IGDB';
+          await saveGames([dbGameData]).catch(err => console.error('Save error:', err));
+        }
+        
+        res.json(gameData);
+      } else {
+        res.status(404).json({ error: 'IGDB game not found' });
+      }
+    } else if (gameId.startsWith('rawg_')) {
+      const rawgId = gameId.replace('rawg_', '');
+      const response = await axios.get(`${rawgBaseUrl}/games/${rawgId}`, {
+        params: { key: RAWG_API_KEY },
+        timeout: 10000
+      });
+      
+      // Convert RAWG format to IGDB-like format for processGame
+      const convertedGame = {
+        id: response.data.id,
+        name: response.data.name,
+        cover: { url: response.data.background_image?.replace('media/', 'media/crop/600/400/') },
+        rating: response.data.rating,
+        aggregated_rating: response.data.metacritic,
+        release_dates: response.data.released ? [{ date: Math.floor(new Date(response.data.released).getTime() / 1000) }] : [],
+        genres: response.data.genres?.map(g => ({ name: g.name })) || [],
+        platforms: response.data.platforms?.map(p => ({ name: p.platform.name })) || [],
+        summary: response.data.description_raw || '',
+        videos: response.data.clip ? [{ video_id: response.data.clip.clip?.split('v=')[1] }] : [],
+        age_ratings: [],
+        involved_companies: response.data.developers?.map(d => ({ company: { name: d.name } })) || [],
+        similar_games: [] // Would need additional API call
+      };
+      
+      gameData = await processGame(convertedGame);
+      
+      // Save to database
+      if (USE_DATABASE) {
+        const dbGameData = await processRawgGame(response.data);
+        await saveGames([dbGameData]).catch(err => console.error('Save error:', err));
+      }
+      
+      res.json(gameData);
+    } else {
+      res.status(404).json({ error: 'Game not found or format not supported' });
+    }
+  } catch (err) {
+    console.error('/games/:id/processed ERROR:', err.message);
+    res.status(500).json({ error: 'Failed to process game data' });
+  }
+});
+
 // Favorite and Status routes
 app.get('/games/:id/favorite', authenticate, async (req, res) => {
   try {
@@ -501,7 +778,12 @@ app.get('/api-status', async (req, res) => {
 // Start server
 const server = app.listen(PORT, async () => {
   console.log(`🚀 Games API Server started on port ${PORT}`);
+  
+  // Initialize IGDB
+  await initializeIGDB();
+  
   console.log('📊 Available sources:', {
+    IGDB: !!IGDB_CLIENT_ID && !!IGDB_CLIENT_SECRET ? '✅ Configured' : '❌ Missing Credentials',
     RAWG: !!RAWG_API_KEY ? '✅ Configured' : '❌ Missing API Key',
     GiantBomb: !!GIANT_BOMB_API_KEY ? '✅ Configured' : '❌ Missing API Key',
     TheGamesDB: !!THEGAMESDB_API_KEY ? '✅ Configured' : '❌ Missing API Key',
