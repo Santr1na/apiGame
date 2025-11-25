@@ -33,6 +33,7 @@ build/
 
 # API keys file
 key_api.txt
+infoGame_fixed.java
 
 # Temporary files
 tmp/

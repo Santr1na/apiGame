@@ -331,13 +331,27 @@ async function processGame(g) {
     };
   })) : [];
   
+  // Исправленная обработка рейтинга - IGDB aggregated_rating может быть в разных форматах
+  let processedRating = 0;
+  if (g.aggregated_rating) {
+    // IGDB aggregated_rating часто возвращает значения в формате 0-1000 или 0-100
+    // Нужно нормализовать до 0-100
+    if (g.aggregated_rating > 100) {
+      processedRating = Math.round(g.aggregated_rating / 10); // 850 -> 85
+    } else {
+      processedRating = Math.round(g.aggregated_rating);
+    }
+  } else if (g.rating) {
+    processedRating = Math.round(g.rating);
+  }
+  
   return {
     id: g.id, 
     name: g.name, 
     genres, 
     platforms: plats,
     release_date: g.release_dates?.[0]?.date ? new Date(g.release_dates[0].date * 1000).toISOString().split('T')[0] : 'N/A',
-    rating: Math.round(g.aggregated_rating || g.rating || 0) || 'N/A',
+    rating: processedRating || 'N/A',
     rating_type: g.aggregated_rating ? 'Critics' : 'Users',
     cover_image: await getGameCover(g.name, plats, cover),
     age_ratings: g.age_ratings ? g.age_ratings.map(r => ({1:'ESRB: EC',2:'ESRB: E',3:'ESRB: E10+',4:'ESRB: T',5:'ESRB: M',6:'ESRB: AO',7:'PEGI: 3',8:'PEGI: 7',9:'PEGI: 12',10:'PEGI: 16',11:'PEGI: 18'}[r.rating] || 'N/A')) : ['N/A'],
